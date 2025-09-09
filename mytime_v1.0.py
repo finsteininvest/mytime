@@ -1,15 +1,3 @@
-"""
-Structured-style planner — Python/Tkinter + SQLite (v0.6)
-
-New in v0.6:
-- Week View (Mon–Sun) with drag-and-drop: move events across days and times.
-- Create events in Week View by clicking a slot (uses selected task; supports recurrence like Day View).
-- Keeps v0.5 features: recurrence (daily/weekly), templates, color-coded projects & priorities, .ics import/export, desktop notifications.
-
-Notes:
-- Pure standard library.
-- Week starts Monday to match EU conventions.
-"""
 
 import sqlite3
 import tkinter as tk
