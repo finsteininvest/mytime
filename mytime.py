@@ -87,6 +87,8 @@ def init_db():
     columns = [row[1] for row in cur.fetchall()]
     if 'is_done' not in columns:
         cur.execute("ALTER TABLE events ADD COLUMN is_done INTEGER NOT NULL DEFAULT 0")
+    if 'notes' not in columns:
+        cur.execute("ALTER TABLE events ADD COLUMN notes TEXT DEFAULT ''")
     conn.commit(); conn.close()
 
 # --------------------- Helpers ---------------------
@@ -208,6 +210,43 @@ class ProjectEditor(tk.Toplevel):
 
 # --------------------- UI: Task Editor ---------------------
 
+class EventEditor(tk.Toplevel):
+    def __init__(self, master, event, on_save=None):
+        super().__init__(master)
+        self.title("Event")
+        self.resizable(False, False)
+        self.event = event
+        self.on_save = on_save
+
+        ttk.Label(self, text="Title").grid(row=0, column=0, sticky="w", padx=8, pady=(8,2))
+        self.title_var = tk.StringVar(value=event["title"] if event else "")
+        ttk.Entry(self, textvariable=self.title_var, width=44).grid(row=1, column=0, columnspan=4, padx=8, sticky="ew")
+
+        ttk.Label(self, text="Notes").grid(row=5, column=0, sticky="w", padx=8, pady=(8,2))
+        self.notes = tk.Text(self, width=60, height=8)
+        self.notes.grid(row=6, column=0, columnspan=4, padx=8, pady=(0,8))
+        if event:
+            self.notes.insert("1.0", event["notes"] or "")
+
+        btns = ttk.Frame(self)
+        btns.grid(row=7, column=0, columnspan=4, pady=8)
+        ttk.Button(btns, text="Cancel", command=self.destroy).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btns, text="Save", command=self.save).pack(side=tk.RIGHT)
+
+    def save(self):
+        title = self.title_var.get().strip()
+        if not title:
+            messagebox.showerror("Missing title", "Please enter a title")
+            return
+        notes = self.notes.get("1.0", "end").strip()
+        if self.on_save:
+            self.on_save({
+                "title": title,
+                "notes": notes,
+            })
+        self.destroy()
+
+
 class TaskEditor(tk.Toplevel):
     def __init__(self, master, task=None, on_save=None):
         super().__init__(master)
@@ -299,8 +338,18 @@ class TasksPanel(ttk.Frame):
         super().__init__(master)
         self.on_task_selected = on_task_selected
         self.on_new_from_template = on_new_from_template
+        self.filter_str = ""
+
+        search_frame = ttk.Frame(self)
+        search_frame.pack(fill=tk.X, padx=8, pady=(8,0))
+        ttk.Label(search_frame, text="Filter:").pack(side=tk.LEFT)
+        self.search_var = tk.StringVar()
+        search_entry = ttk.Entry(search_frame, textvariable=self.search_var)
+        search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4,0))
+        search_entry.bind("<KeyRelease>", self._on_search)
 
         tree_frame = ttk.Frame(self)
+        tree_frame.pack(fill=tk.BOTH, expand=True)
         
         self.tree = ttk.Treeview(tree_frame, columns=("prio","dur","recur","proj", "scheduled"), show="headings", selectmode="browse", height=18)
         self.tree.heading("prio", text="Priority")
@@ -355,6 +404,9 @@ class TasksPanel(ttk.Frame):
                 elif event.num == 5:
                     self.tree.yview_scroll(1, "units")
 
+    def _on_search(self, event=None):
+        self.refresh(self.search_var.get())
+
     def unschedule(self):
         tid = self.selected_task_id()
         if not tid:
@@ -373,13 +425,22 @@ class TasksPanel(ttk.Frame):
         # refresh everywhere
         self.on_new_from_template()  # calls App.refresh_all
 
-    def refresh(self):
+    def refresh(self, filter_str=None):
+        if filter_str is not None:
+            self.filter_str = filter_str
+
         for i in self.tree.get_children():
             self.tree.delete(i)
         conn = get_conn()
-        tasks = conn.execute(
-            "SELECT t.*, p.name as proj FROM tasks t LEFT JOIN projects p ON t.project_id=p.id ORDER BY t.created_at DESC"
-        ).fetchall()
+
+        query = "SELECT t.*, p.name as proj FROM tasks t LEFT JOIN projects p ON t.project_id=p.id"
+        params = []
+        if self.filter_str:
+            query += " WHERE (t.title LIKE ? OR t.notes LIKE ?)"
+            params.extend([f"%{self.filter_str}%", f"%{self.filter_str}%"])
+        query += " ORDER BY t.created_at DESC"
+
+        tasks = conn.execute(query, params).fetchall()
         
         events_by_task = {}
         all_events = conn.execute("SELECT task_id, start_dt FROM events ORDER BY start_dt").fetchall()
@@ -511,8 +572,20 @@ class EventsPanel(ttk.Frame):
     def __init__(self, master, on_event_selected):
         super().__init__(master)
         self.on_event_selected = on_event_selected
+        self.filter_str = ""
 
-        self.tree = ttk.Treeview(self, columns=("date", "time", "project", "done"), show="headings", selectmode="browse")
+        search_frame = ttk.Frame(self)
+        search_frame.pack(fill=tk.X, padx=8, pady=(8,0))
+        ttk.Label(search_frame, text="Filter:").pack(side=tk.LEFT)
+        self.search_var = tk.StringVar()
+        search_entry = ttk.Entry(search_frame, textvariable=self.search_var)
+        search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4,0))
+        search_entry.bind("<KeyRelease>", self._on_search)
+
+        tree_frame = ttk.Frame(self)
+        tree_frame.pack(fill=tk.BOTH, expand=True)
+
+        self.tree = ttk.Treeview(tree_frame, columns=("date", "time", "project", "done"), show="headings", selectmode="browse")
         self.tree.heading("date", text="Date")
         self.tree.heading("time", text="Time")
         self.tree.heading("project", text="Project")
@@ -523,7 +596,7 @@ class EventsPanel(ttk.Frame):
         self.tree.column("project", width=120, anchor="w")
         self.tree.column("done", width=50, anchor="center")
 
-        scrollbar = ttk.Scrollbar(self, orient=tk.VERTICAL, command=self.tree.yview)
+        scrollbar = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscrollcommand=scrollbar.set)
 
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0), pady=8)
@@ -552,14 +625,25 @@ class EventsPanel(ttk.Frame):
                 elif event.num == 5:
                     self.tree.yview_scroll(1, "units")
 
-    def refresh(self):
+    def _on_search(self, event=None):
+        self.refresh(self.search_var.get())
+
+    def refresh(self, filter_str=None):
+        if filter_str is not None:
+            self.filter_str = filter_str
+
         for i in self.tree.get_children():
             self.tree.delete(i)
         
         conn = get_conn()
-        events = conn.execute(
-            "SELECT e.*, p.name as proj_name FROM events e LEFT JOIN projects p ON e.project_id = p.id ORDER BY e.start_dt"
-        ).fetchall()
+        query = "SELECT e.*, p.name as proj_name FROM events e LEFT JOIN projects p ON e.project_id = p.id"
+        params = []
+        if self.filter_str:
+            query += " WHERE (e.title LIKE ? OR e.notes LIKE ?)"
+            params.extend([f"%{self.filter_str}%", f"%{self.filter_str}%"])
+        query += " ORDER BY e.start_dt"
+        
+        events = conn.execute(query, params).fetchall()
         conn.close()
 
         for event in events:
@@ -628,11 +712,11 @@ class BaseCalendarView(ttk.Frame):
         outline = "#4a6dac"
         return color, outline
 
-    def _create_event(self, title, task_id, start_dt, end_dt, project_id, priority):
+    def _create_event(self, title, task_id, start_dt, end_dt, project_id, priority, notes):
         conn = get_conn();
         conn.execute(
-            "INSERT INTO events(title, task_id, start_dt, end_dt, created_at, updated_at, project_id, priority) VALUES (?,?,?,?,?,?,?,?)",
-            (title, task_id, start_dt.isoformat(), end_dt.isoformat(), now_iso(), now_iso(), project_id, priority)
+            "INSERT INTO events(title, task_id, start_dt, end_dt, created_at, updated_at, project_id, priority, notes) VALUES (?,?,?,?,?,?,?,?,?)",
+            (title, task_id, start_dt.isoformat(), end_dt.isoformat(), now_iso(), now_iso(), project_id, priority, notes)
         ); conn.commit(); conn.close(); self._notify_change()
 
     def _create_series(self, task, first_start_dt: datetime):
@@ -647,8 +731,8 @@ class BaseCalendarView(ttk.Frame):
         conn = get_conn(); cur = conn.cursor(); start = first_start_dt
         for _ in range(count):
             cur.execute(
-                "INSERT INTO events(title, task_id, start_dt, end_dt, created_at, updated_at, project_id, priority) VALUES (?,?,?,?,?,?,?,?)",
-                (task["title"], task["id"], start.isoformat(), (start+dur).isoformat(), now_iso(), now_iso(), task["project_id"], task["priority"]))
+                "INSERT INTO events(title, task_id, start_dt, end_dt, created_at, updated_at, project_id, priority, notes) VALUES (?,?,?,?,?,?,?,?,?)",
+                (task["title"], task["id"], start.isoformat(), (start+dur).isoformat(), now_iso(), now_iso(), task["project_id"], task["priority"], task["notes"]))
             start += delta
         conn.commit(); conn.close(); self._notify_change()
     
@@ -716,6 +800,30 @@ class BaseCalendarView(ttk.Frame):
         conn.commit()
         conn.close()
         self._notify_change()
+
+    def _open_event_editor(self, event_data):
+        event_id = event_data.get("id")
+        if not event_id:
+            return
+
+        conn = get_conn()
+        event = conn.execute("SELECT * FROM events WHERE id=?", (event_id,)).fetchone()
+        conn.close()
+        if not event:
+            messagebox.showerror("Error", f"Event with ID {event_id} not found.")
+            return
+
+        def on_save(data):
+            conn = get_conn()
+            conn.execute(
+                "UPDATE events SET title=?, notes=?, updated_at=? WHERE id=?",
+                (data["title"], data["notes"], now_iso(), event_id)
+            )
+            conn.commit()
+            conn.close()
+            self._notify_change()
+
+        EventEditor(self, event=event, on_save=on_save)
 
 class DayView(BaseCalendarView):
     def __init__(self, master, notify_callback, on_change_callback=None):
@@ -785,6 +893,7 @@ class DayView(BaseCalendarView):
                 self.context_menu.add_separator()
 
             self.context_menu.add_command(label="Edit Task...", command=lambda: self._open_task_editor_for_event(event_data))
+            self.context_menu.add_command(label="Edit Event...", command=lambda: self._open_event_editor(event_data))
             self.context_menu.add_command(label="Delete Event", command=lambda: self._delete_event(event_data))
 
             try:
@@ -838,6 +947,8 @@ class DayView(BaseCalendarView):
         if r["is_done"]:
             text_color = "#999" # Light grey for done tasks
         text = self.canvas.create_text(x1+8, y1+8, text=label, anchor="nw", fill=text_color)
+        if r["notes"]:
+            self.canvas.create_text(x2-8, y1+8, text="📝", anchor="ne", fill="#555")
         handle = self.canvas.create_rectangle(x2-12, y2-6, x2-4, y2-2, fill=outline, outline="")
         self._event_items[rect] = r; self._event_items[text] = r; self._event_items[handle] = (r, "handle")
         self._reverse_map.setdefault(r["id"], []).extend([rect, text, handle])
@@ -865,7 +976,7 @@ class DayView(BaseCalendarView):
         
         t = y_to_time(self.canvas.canvasy(event.y)); start_dt = round_dt(datetime.combine(self.current_date, t)); end_dt = start_dt + timedelta(minutes=int(task["duration_minutes"]))
         if task["recurrence"] in ("DAILY","WEEKLY"): self._create_series(task, start_dt)
-        else: self._create_event(task["title"], task["id"], start_dt, end_dt, task["project_id"], task["priority"])
+        else: self._create_event(task["title"], task["id"], start_dt, end_dt, task["project_id"], task["priority"], task["notes"])
 
     def on_drag(self, event):
         if not self.dragging_event_id: return
@@ -971,6 +1082,7 @@ class WeekView(BaseCalendarView):
                 self.context_menu.add_separator()
 
             self.context_menu.add_command(label="Edit Task...", command=lambda: self._open_task_editor_for_event(event_data))
+            self.context_menu.add_command(label="Edit Event...", command=lambda: self._open_event_editor(event_data))
             self.context_menu.add_command(label="Delete Event", command=lambda: self._delete_event(event_data))
 
             try:
@@ -1057,6 +1169,8 @@ class WeekView(BaseCalendarView):
         if r["is_done"]:
             text_color = "#999"
         text = self.canvas.create_text(x1i+6, y1+6, text=label, anchor="nw", fill=text_color)
+        if r["notes"]:
+            self.canvas.create_text(x2i-6, y1+6, text="📝", anchor="ne", fill="#555")
         self._event_items[rect] = r; self._event_items[text] = r
         self._reverse_map.setdefault(r["id"], []).extend([rect, text])
 
@@ -1095,7 +1209,7 @@ class WeekView(BaseCalendarView):
         start_dt = round_dt(datetime.combine(slot_date, t))
         end_dt = start_dt + timedelta(minutes=int(task["duration_minutes"]))
         if task["recurrence"] in ("DAILY","WEEKLY"): self._create_series(task, start_dt)
-        else: self._create_event(task["title"], task["id"], start_dt, end_dt, task["project_id"], task["priority"])
+        else: self._create_event(task["title"], task["id"], start_dt, end_dt, task["project_id"], task["priority"], task["notes"])
 
     def _day_idx_from_x(self, x):
         for d in range(7):
@@ -1155,10 +1269,14 @@ def export_ics(filepath: str, events_rows):
     def fmt(dt: datetime): return dt.strftime("%Y%m%dT%H%M%S")
     lines = ["BEGIN:VCALENDAR","VERSION:2.0","PRODID:-//MyTime-Python//EN"]
     for r in events_rows:
-        dtstart = datetime.fromisoformat(r["start_dt"]) ; dtend = datetime.fromisoformat(r["end_dt"]) 
-        lines += ["BEGIN:VEVENT", f"SUMMARY:{r['title']}", f"DTSTART:{fmt(dtstart)}", f"DTEND:{fmt(dtend)}", f"UID:{r['id']}@mytime-python", "END:VEVENT"]
+        dtstart = datetime.fromisoformat(r["start_dt"]) ; dtend = datetime.fromisoformat(r["end_dt"])
+        lines += ["BEGIN:VEVENT", f"SUMMARY:{r['title']}", f"DTSTART:{fmt(dtstart)}", f"DTEND:{fmt(dtend)}", f"UID:{r['id']}@mytime-python"]
+        if r["notes"]:
+            lines.append(f"DESCRIPTION:{r['notes']}")
+        lines.append("END:VEVENT")
     lines.append("END:VCALENDAR")
-    with open(filepath, "w", encoding="utf-8") as f: f.write("".join(lines))
+    with open(filepath, "w", encoding="utf-8") as f: f.write("".join(map(lambda l: l + '\r\n', lines)))
+
 
 
 def import_ics(filepath: str):
@@ -1178,11 +1296,12 @@ def import_ics(filepath: str):
     conn = get_conn(); cur = conn.cursor()
     for e in events:
         title = e.get("SUMMARY", "(No title)")
+        notes = e.get("DESCRIPTION", "")
         try:
             s = dt_from_ics(e["DTSTART"]); en = dt_from_ics(e["DTEND"])
         except Exception as ex:
             print("Skip bad VEVENT:", ex, file=sys.stderr); continue
-        cur.execute("INSERT INTO events(title, task_id, start_dt, end_dt, created_at, updated_at, project_id, priority) VALUES (?,?,?,?,?,?,?,?)", (title, None, s.isoformat(), en.isoformat(), now_iso(), now_iso(), None, 'Normal'))
+        cur.execute("INSERT INTO events(title, task_id, start_dt, end_dt, created_at, updated_at, project_id, priority, notes) VALUES (?,?,?,?,?,?,?,?,?)", (title, None, s.isoformat(), en.isoformat(), now_iso(), now_iso(), None, 'Normal', notes))
     conn.commit(); conn.close()
 
 # --------------------- App Shell ---------------------
@@ -1190,7 +1309,7 @@ def import_ics(filepath: str):
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("MyTime Planner V1.0")
+        self.title("MyTime Planner V1.3")
         self.geometry(f"{LEFT_WIDTH+RIGHT_MIN_WIDTH}x860")
         self.minsize(LEFT_WIDTH+RIGHT_MIN_WIDTH, 680)
         self.style = ttk.Style(self)
