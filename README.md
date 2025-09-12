@@ -20,3 +20,7 @@ or
 python mytime.py
 
 If you have to add the "3" or not depends how you installed Python.
+
+## Read documentation
+
+Coming soon...
