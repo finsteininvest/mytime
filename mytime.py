@@ -257,7 +257,9 @@ class TaskEditor(tk.Toplevel):
 
         ttk.Label(self, text="Title").grid(row=0, column=0, sticky="w", padx=8, pady=(8,2))
         self.title_var = tk.StringVar(value=task["title"] if task else "")
-        ttk.Entry(self, textvariable=self.title_var, width=44).grid(row=1, column=0, columnspan=4, padx=8, sticky="ew")
+        title_entry = ttk.Entry(self, textvariable=self.title_var, width=44)
+        title_entry.grid(row=1, column=0, columnspan=4, padx=8, sticky="ew")
+        title_entry.focus_set()
 
         ttk.Label(self, text="Duration (min)").grid(row=2, column=0, sticky="w", padx=8, pady=(8,2))
         self.duration_var = tk.IntVar(value=task["duration_minutes"] if task else 30)
@@ -335,6 +337,8 @@ class TaskEditor(tk.Toplevel):
 
 class TasksPanel(ttk.Frame):
     def __init__(self, master, on_task_selected, on_new_from_template):
+        self.filter_str = ""
+        self.hidden_flags = set()
         super().__init__(master)
         self.on_task_selected = on_task_selected
         self.on_new_from_template = on_new_from_template
@@ -426,59 +430,115 @@ class TasksPanel(ttk.Frame):
         self.on_new_from_template()  # calls App.refresh_all
 
     def refresh(self, filter_str=None):
+        # --- 1) Parse commands like "/hide Scheduled" or "/unhide Scheduled"
         if filter_str is not None:
-            self.filter_str = filter_str
+            cmd = filter_str.strip()
+            if cmd.startswith("/hide "):
+                flag = cmd[len("/hide "):].strip()
+                if flag.lower() == "all":
+                    # Common flags you may want to hide in one go
+                    self.hidden_flags.update({"Scheduled", "Done"})
+                elif flag:
+                    self.hidden_flags.add(flag)
+                # Clear the visible search after a command
+                self.filter_str = ""
+            elif cmd.startswith("/unhide"):
+                rest = cmd[len("/unhide"):].strip()
+                if rest:  # e.g. "/unhide Scheduled"
+                    if rest.lower() == "all":
+                        self.hidden_flags.clear()
+                    else:
+                        self.hidden_flags.discard(rest)
+                else:
+                    # bare "/unhide" clears everything
+                    self.hidden_flags.clear()
+                self.filter_str = ""
+            else:
+                # normal text search
+                self.filter_str = cmd
 
+        # --- 2) Clear current rows
         for i in self.tree.get_children():
             self.tree.delete(i)
-        conn = get_conn()
 
-        query = "SELECT t.*, p.name as proj FROM tasks t LEFT JOIN projects p ON t.project_id=p.id"
+        # --- 3) Query tasks (respecting text search only)
+        conn = get_conn()
+        query = """
+            SELECT t.*, p.name AS proj
+            FROM tasks t
+            LEFT JOIN projects p ON t.project_id = p.id
+        """
         params = []
         if self.filter_str:
             query += " WHERE (t.title LIKE ? OR t.notes LIKE ?)"
-            params.extend([f"%{self.filter_str}%", f"%{self.filter_str}%"])
+            like = f"%{self.filter_str}%"
+            params.extend([like, like])
         query += " ORDER BY t.created_at DESC"
-
         tasks = conn.execute(query, params).fetchall()
-        
+
+        # Gather scheduled events grouped by task
         events_by_task = {}
-        all_events = conn.execute("SELECT task_id, start_dt FROM events ORDER BY start_dt").fetchall()
-        for event in all_events:
-            task_id = event['task_id']
-            if task_id:
-                if task_id not in events_by_task:
-                    events_by_task[task_id] = []
-                events_by_task[task_id].append(datetime.fromisoformat(event['start_dt']))
-        
+        all_events = conn.execute(
+            "SELECT task_id, start_dt FROM events ORDER BY start_dt"
+        ).fetchall()
         conn.close()
+
+        for ev in all_events:
+            tid = ev["task_id"]
+            if tid:
+                events_by_task.setdefault(tid, []).append(
+                    datetime.fromisoformat(ev["start_dt"])
+                )
+
+        # --- 4) Build rows, applying hidden flags
         now = datetime.now()
-
         for r in tasks:
-            recur = r["recurrence"] if r["recurrence"] else "—"
-            proj = r["proj"] or "—"
-            
-            scheduled_date_str = "—"
-            task_events = events_by_task.get(r['id'])
+            task_events = events_by_task.get(r["id"], [])
+            is_scheduled = bool(task_events)
+            is_done = bool(r["is_done"])
 
+            # Apply /hide flags:
+            # - "Scheduled": hide tasks that have any scheduled event (past or future)
+            # - "Done": hide tasks marked done
+            if "Scheduled" in self.hidden_flags and is_scheduled:
+                continue
+            if "Done" in self.hidden_flags and is_done:
+                continue
+
+            # Compute "Scheduled" column text (first upcoming if recurring, else first)
+            scheduled_date_str = ""
             if task_events:
                 if r["recurrence"]:
-                    future_events = [e for e in task_events if e > now]
-                    if future_events:
-                        scheduled_date_str = future_events[0].strftime('%Y-%m-%d %H:%M')
-                    else:
-                        scheduled_date_str = task_events[-1].strftime('%Y-%m-%d %H:%M')
+                    future_events = [dt for dt in task_events if dt > now]
+                    shown = future_events[0] if future_events else task_events[-1]
                 else:
-                    scheduled_date_str = task_events[0].strftime('%Y-%m-%d %H:%M')
+                    shown = task_events[0]
+                scheduled_date_str = shown.strftime("%Y-%m-%d %H:%M")
 
-            tags = ()
-            if r["is_done"]:
-                tags = ("done",)
-
-            self.tree.insert("", "end", iid=str(r["id"]), values=(r["priority"], f"{r['duration_minutes']} min", recur, proj, scheduled_date_str), text=r["title"], tags=tags) 
-        
+            tags = ("done",) if is_done else ()
+            self.tree.insert(
+                "",
+                "end",
+                iid=str(r["id"]),
+                text=r["title"],
+                values=(
+                    r["priority"],
+                    r["duration_minutes"],
+                    r["recurrence"] or "",
+                    r["proj"] or "—",
+                    scheduled_date_str,
+                ),
+                tags=tags,
+            )
         self.tree.configure(show=("tree","headings"))
         self.tree.heading("#0", text="Task")
+
+    '''
+    /hide Scheduled → hides any task that has at least one event linked in events.
+    /unhide Scheduled → shows them again.
+    /hide Done and /unhide Done work too since we wired that in.
+    /hide all / /unhide all are optional helpers already included.
+    '''
 
     def selected_task_id(self):
         sel = self.tree.selection()
@@ -518,8 +578,8 @@ class TasksPanel(ttk.Frame):
                 (data["title"], data["duration_minutes"], data["notes"], now_iso(), data["recurrence"], data["is_template"], data["project_id"], data["priority"], tid)
             )
             conn.execute(
-                "UPDATE events SET project_id=? WHERE task_id=?",
-                (data["project_id"], tid)
+                "UPDATE events SET title=?, project_id=? WHERE task_id=?",
+                (data["title"], data["project_id"], tid)
             )
             conn.commit(); conn.close()
             self.on_new_from_template() # This calls App.refresh_all
@@ -892,7 +952,7 @@ class DayView(BaseCalendarView):
                 self.context_menu.add_command(label=label, command=lambda: self._toggle_event_done(event_id))
                 self.context_menu.add_separator()
 
-            self.context_menu.add_command(label="Edit Task...", command=lambda: self._open_task_editor_for_event(event_data))
+            #self.context_menu.add_command(label="Edit Task...", command=lambda: self._open_task_editor_for_event(event_data))
             self.context_menu.add_command(label="Edit Event...", command=lambda: self._open_event_editor(event_data))
             self.context_menu.add_command(label="Delete Event", command=lambda: self._delete_event(event_data))
 
@@ -957,17 +1017,31 @@ class DayView(BaseCalendarView):
         canvas_x = self.canvas.canvasx(event.x)
         canvas_y = self.canvas.canvasy(event.y)
         overlaps = self.canvas.find_overlapping(canvas_x, canvas_y, canvas_x, canvas_y)
-        item = overlaps[0] if overlaps else None
-        if item and item in self._event_items:
-            val = self._event_items[item]
-            if isinstance(val, tuple) and val[1] == "handle":
-                r = val[0]; self.dragging_event_id = r["id"]; self.drag_mode = "resize"
-            else:
-                r = val; self.dragging_event_id = r["id"]; self.drag_mode = "move"
-                rect_id = self._reverse_map[self.dragging_event_id][0]
-                x1, y1, x2, y2 = self.canvas.coords(rect_id)
-                self.drag_offset_y = self.canvas.canvasy(event.y) - y1
-            return
+
+        # Prioritize finding a handle among overlapping items, checking topmost first
+        for item_id in reversed(overlaps):
+            if item_id in self._event_items:
+                val = self._event_items[item_id]
+                if isinstance(val, tuple) and val[1] == "handle":
+                    r = val[0]
+                    self.dragging_event_id = r["id"]
+                    self.drag_mode = "resize"
+                    return
+
+        # If no handle was clicked, check for a regular event item
+        for item_id in reversed(overlaps):
+             if item_id in self._event_items:
+                val = self._event_items[item_id]
+                if not isinstance(val, tuple):
+                    r = val
+                    self.dragging_event_id = r["id"]
+                    self.drag_mode = "move"
+                    rect_id = self._reverse_map[self.dragging_event_id][0]
+                    x1, y1, x2, y2 = self.canvas.coords(rect_id)
+                    self.drag_offset_y = self.canvas.canvasy(event.y) - y1
+                    return
+
+        # If nothing was clicked, it's a click on an empty space
         if not self.selected_task_id:
             messagebox.showinfo("Select a task", "Select a task from the list first.")
             return
@@ -1010,10 +1084,31 @@ class DayView(BaseCalendarView):
         self.dragging_event_id = None; self.drag_mode = None; self._notify_change()
 
     def _tick_notifications(self):
-        now = datetime.now(); start_day = datetime.combine(date.today(), time(0,0)); end_day = start_day + timedelta(days=1)
-        conn = get_conn(); rows = conn.execute("SELECT id, title, start_dt FROM events WHERE start_dt>=? AND start_dt<? ORDER BY start_dt", (start_day.isoformat(), end_day.isoformat())).fetchall(); conn.close()
-        upcoming = [r for r in rows if 0 <= (datetime.fromisoformat(r["start_dt"]) - now).total_seconds() <= 300]
-        for r in upcoming: self.master.event_generate("<<Notify>>", when="tail"); self.notify_callback(f"Upcoming: {r['title']} at {datetime.fromisoformat(r['start_dt']).strftime('%H:%M')}")
+        now = datetime.now()
+        start_day = datetime.combine(date.today(), time(0, 0))
+        end_day = start_day + timedelta(days=1)
+        conn = get_conn()
+        rows = conn.execute(
+            "SELECT id, title, start_dt FROM events WHERE start_dt>=? AND start_dt<? ORDER BY start_dt",
+            (start_day.isoformat(), end_day.isoformat())
+        ).fetchall()
+        conn.close()
+
+        for r in rows:
+            event_start_dt = datetime.fromisoformat(r["start_dt"])
+            delta_seconds = (event_start_dt - now).total_seconds()
+            event_time_str = event_start_dt.strftime('%H:%M')
+
+            # Notify 5 minutes before
+            if 240 < delta_seconds <= 300:
+                self.master.event_generate("<<Notify>>", when="tail")
+                self.notify_callback(f"Upcoming in 5 mins: {r['title']} at {event_time_str}")
+
+            # Notify at start time
+            elif 0 <= delta_seconds < 60:
+                self.master.event_generate("<<Notify>>", when="tail")
+                self.notify_callback(f"Starting now: {r['title']} at {event_time_str}")
+
         self.after(60000, self._tick_notifications)
 
 class WeekView(BaseCalendarView):
@@ -1081,7 +1176,7 @@ class WeekView(BaseCalendarView):
                 self.context_menu.add_command(label=label, command=lambda: self._toggle_event_done(event_id))
                 self.context_menu.add_separator()
 
-            self.context_menu.add_command(label="Edit Task...", command=lambda: self._open_task_editor_for_event(event_data))
+            #self.context_menu.add_command(label="Edit Task...", command=lambda: self._open_task_editor_for_event(event_data))
             self.context_menu.add_command(label="Edit Event...", command=lambda: self._open_event_editor(event_data))
             self.context_menu.add_command(label="Delete Event", command=lambda: self._delete_event(event_data))
 
@@ -1309,7 +1404,14 @@ def import_ics(filepath: str):
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("MyTime Planner V1.3")
+        self.title("MyTime Planner V1.4")
+        try:
+            # Set application icon
+            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.png")
+            photo = tk.PhotoImage(file=icon_path)
+            self.iconphoto(True, photo)
+        except Exception as e:
+            print(f"Could not load application icon: {e}", file=sys.stderr)
         self.geometry(f"{LEFT_WIDTH+RIGHT_MIN_WIDTH}x860")
         self.minsize(LEFT_WIDTH+RIGHT_MIN_WIDTH, 680)
         self.style = ttk.Style(self)
@@ -1426,16 +1528,8 @@ class App(tk.Tk):
         self.refresh_all(); messagebox.showinfo("Import", "Import completed.")
 
     def _notify(self, text: str):
-        try:
-            if sys.platform == "darwin":
-                import subprocess
-                subprocess.run(["osascript", "-e", f'display notification "{text}" with title "Planner"'])
-            elif sys.platform.startswith("linux"):
-                os.system(f"notify-send 'Planner' '{text}' || true")
-            else:
-                messagebox.showinfo("Reminder", text)
-        except Exception:
-            messagebox.showinfo("Reminder", text)
+        self.bell()
+        messagebox.showwarning("Reminder", text)
 
     def on_task_selected(self, tid):
         self.day_view.set_selected_task(tid)
