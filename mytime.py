@@ -218,31 +218,76 @@ class EventEditor(tk.Toplevel):
         self.event = event
         self.on_save = on_save
 
+        # --- Title
         ttk.Label(self, text="Title").grid(row=0, column=0, sticky="w", padx=8, pady=(8,2))
         self.title_var = tk.StringVar(value=event["title"] if event else "")
         ttk.Entry(self, textvariable=self.title_var, width=44).grid(row=1, column=0, columnspan=4, padx=8, sticky="ew")
 
+        # --- Date & Time (NEW)
+        start_dt = datetime.fromisoformat(event["start_dt"]) if event and event.get("start_dt") else datetime.now()
+        ttk.Label(self, text="Date (YYYY-MM-DD)").grid(row=2, column=0, sticky="w", padx=8, pady=(8,2))
+        ttk.Label(self, text="Time (HH:MM)").grid(row=2, column=1, sticky="w", padx=8, pady=(8,2))
+
+        self.date_var = tk.StringVar(value=start_dt.strftime("%Y-%m-%d"))
+        self.time_var = tk.StringVar(value=start_dt.strftime("%H:%M"))
+
+        ttk.Entry(self, textvariable=self.date_var, width=14).grid(row=3, column=0, padx=8, sticky="w")
+        ttk.Entry(self, textvariable=self.time_var, width=10).grid(row=3, column=1, padx=8, sticky="w")
+
+        # --- Notes
         ttk.Label(self, text="Notes").grid(row=5, column=0, sticky="w", padx=8, pady=(8,2))
         self.notes = tk.Text(self, width=60, height=8)
         self.notes.grid(row=6, column=0, columnspan=4, padx=8, pady=(0,8))
-        if event:
-            self.notes.insert("1.0", event["notes"] or "")
+        if event and event.get("notes"):
+            self.notes.insert("1.0", event["notes"])
 
+        # --- Buttons
         btns = ttk.Frame(self)
-        btns.grid(row=7, column=0, columnspan=4, pady=8)
-        ttk.Button(btns, text="Cancel", command=self.destroy).pack(side=tk.RIGHT, padx=4)
+        btns.grid(row=7, column=0, columnspan=4, sticky="e", padx=8, pady=(0,8))
+        ttk.Button(btns, text="Cancel", command=self.destroy).pack(side=tk.RIGHT, padx=(6,0))
         ttk.Button(btns, text="Save", command=self.save).pack(side=tk.RIGHT)
+
+        # Simple keyboard UX
+        self.bind("<Return>", lambda e: self.save())
+        self.bind("<Escape>", lambda e: self.destroy())
+
+    def _parse_start(self):
+        d = self.date_var.get().strip()
+        t = self.time_var.get().strip()
+        # require HH:MM; show a friendly error if invalid
+        try:
+            return datetime.strptime(f"{d} {t}", "%Y-%m-%d %H:%M")
+        except ValueError:
+            messagebox.showerror("Invalid date/time", "Please use YYYY-MM-DD and HH:MM (24h).")
+            return None
 
     def save(self):
         title = self.title_var.get().strip()
         if not title:
             messagebox.showerror("Missing title", "Please enter a title")
             return
+
+        new_start = self._parse_start()
+        if new_start is None:
+            return
+
+        # Keep the original duration
+        try:
+            old_start = datetime.fromisoformat(self.event["start_dt"])
+            old_end = datetime.fromisoformat(self.event["end_dt"])
+            duration = old_end - old_start
+        except Exception:
+            duration = timedelta(minutes=60)  # safe default if missing
+
+        new_end = new_start + duration
         notes = self.notes.get("1.0", "end").strip()
+
         if self.on_save:
             self.on_save({
                 "title": title,
                 "notes": notes,
+                "start_dt": new_start,
+                "end_dt": new_end,
             })
         self.destroy()
 
@@ -869,21 +914,29 @@ class BaseCalendarView(ttk.Frame):
         conn = get_conn()
         event = conn.execute("SELECT * FROM events WHERE id=?", (event_id,)).fetchone()
         conn.close()
-        if not event:
-            messagebox.showerror("Error", f"Event with ID {event_id} not found.")
-            return
+
+        if event:  # <-- add this line
+            event = dict(event)
 
         def on_save(data):
             conn = get_conn()
             conn.execute(
-                "UPDATE events SET title=?, notes=?, updated_at=? WHERE id=?",
-                (data["title"], data["notes"], now_iso(), event_id)
+                "UPDATE events SET title=?, notes=?, start_dt=?, end_dt=?, updated_at=? WHERE id=?",
+                (
+                    data["title"],
+                    data["notes"],
+                    data["start_dt"].isoformat(timespec="minutes"),
+                    data["end_dt"].isoformat(timespec="minutes"),
+                    now_iso(),
+                    event_id,
+                )
             )
             conn.commit()
             conn.close()
             self._notify_change()
 
         EventEditor(self, event=event, on_save=on_save)
+
 
 class DayView(BaseCalendarView):
     def __init__(self, master, notify_callback, on_change_callback=None):
