@@ -51,6 +51,8 @@ def init_db():
     columns = [row[1] for row in cur.fetchall()]
     if 'is_done' not in columns:
         cur.execute("ALTER TABLE tasks ADD COLUMN is_done INTEGER NOT NULL DEFAULT 0")
+    if 'parent_id' not in columns:
+        cur.execute("ALTER TABLE tasks ADD COLUMN parent_id INTEGER REFERENCES tasks(id) ON DELETE CASCADE")
 
     # projects
     cur.execute(
@@ -292,12 +294,15 @@ class EventEditor(tk.Toplevel):
 
 
 class TaskEditor(tk.Toplevel):
-    def __init__(self, master, task=None, on_save=None):
+    def __init__(self, master, task=None, on_save=None, parent_id=None):
         super().__init__(master)
         self.title("Task")
         self.resizable(False, False)
         self.task = task
         self.on_save = on_save
+        self.parent_id = parent_id
+        if task and 'parent_id' in task.keys():
+            self.parent_id = task['parent_id']
 
         ttk.Label(self, text="Title").grid(row=0, column=0, sticky="w", padx=8, pady=(8,2))
         self.title_var = tk.StringVar(value=task["title"] if task else "")
@@ -373,7 +378,8 @@ class TaskEditor(tk.Toplevel):
                 "recurrence": rec,
                 "is_template": 1 if self.is_tmpl.get() else 0,
                 "project_id": pid,
-                "priority": prio
+                "priority": prio,
+                "parent_id": self.parent_id
             })
         self.destroy()
 
@@ -434,6 +440,7 @@ class TasksPanel(ttk.Frame):
         btns = ttk.Frame(self)
         btns.pack(fill=tk.X, padx=8, pady=(0,8))
         ttk.Button(btns, text="(＋) Add", command=self.add).pack(side=tk.LEFT)
+        ttk.Button(btns, text="Add Subtask", command=self.add_subtask).pack(side=tk.LEFT, padx=6)
         ttk.Button(btns, text="✎ (E)dit", command=self.edit).pack(side=tk.LEFT, padx=6)
         ttk.Button(btns, text="✔ (D)one", command=self.mark_as_done).pack(side=tk.LEFT)
         ttk.Button(btns, text="(U)nschedule", command=self.unschedule).pack(side=tk.LEFT)
@@ -480,101 +487,115 @@ class TasksPanel(ttk.Frame):
             if cmd.startswith("/hide "):
                 flag = cmd[len("/hide "):].strip()
                 if flag.lower() == "all":
-                    # Common flags you may want to hide in one go
                     self.hidden_flags.update({"Scheduled", "Done"})
                 elif flag:
                     self.hidden_flags.add(flag)
-                # Clear the visible search after a command
                 self.filter_str = ""
             elif cmd.startswith("/unhide"):
-                rest = cmd[len("/unhide"):].strip()
-                if rest:  # e.g. "/unhide Scheduled"
-                    if rest.lower() == "all":
-                        self.hidden_flags.clear()
-                    else:
-                        self.hidden_flags.discard(rest)
-                else:
-                    # bare "/unhide" clears everything
+                rest = cmd[len("/unhide "):].strip()
+                if rest.lower() == "all":
                     self.hidden_flags.clear()
+                else:
+                    self.hidden_flags.discard(rest)
                 self.filter_str = ""
             else:
-                # normal text search
                 self.filter_str = cmd
 
         # --- 2) Clear current rows
         for i in self.tree.get_children():
             self.tree.delete(i)
 
-        # --- 3) Query tasks (respecting text search only)
+        # --- 3) Query ALL tasks and events
         conn = get_conn()
-        query = """
+        all_tasks = conn.execute("""
             SELECT t.*, p.name AS proj
             FROM tasks t
             LEFT JOIN projects p ON t.project_id = p.id
-        """
-        params = []
-        if self.filter_str:
-            query += " WHERE (t.title LIKE ? OR t.notes LIKE ?)"
-            like = f"%{self.filter_str}%"
-            params.extend([like, like])
-        query += " ORDER BY t.created_at DESC"
-        tasks = conn.execute(query, params).fetchall()
-
-        # Gather scheduled events grouped by task
+            ORDER BY t.created_at ASC
+        """,).fetchall()
+        
         events_by_task = {}
-        all_events = conn.execute(
-            "SELECT task_id, start_dt FROM events ORDER BY start_dt"
-        ).fetchall()
+        all_events = conn.execute("SELECT task_id, start_dt FROM events ORDER BY start_dt").fetchall()
         conn.close()
 
         for ev in all_events:
             tid = ev["task_id"]
             if tid:
-                events_by_task.setdefault(tid, []).append(
-                    datetime.fromisoformat(ev["start_dt"])
-                )
+                events_by_task.setdefault(tid, []).append(datetime.fromisoformat(ev["start_dt"]))
 
-        # --- 4) Build rows, applying hidden flags
+        # --- 4) Filter tasks in memory to preserve hierarchy
+        tasks_to_display = []
+        if self.filter_str:
+            tasks_by_id = {r['id']: dict(r) for r in all_tasks}
+            
+            # Find direct matches
+            filter_term = self.filter_str.lower()
+            matching_ids = {
+                r['id'] for r in all_tasks 
+                if filter_term in r['title'].lower() or (r['notes'] and filter_term in r['notes'].lower())
+            }
+
+            # Include ancestors and descendants of matches
+            ids_to_show = set()
+            
+            def get_all_descendants(task_id):
+                descendants = set()
+                children = [t for t in all_tasks if t['parent_id'] == task_id]
+                for child in children:
+                    descendants.add(child['id'])
+                    descendants.update(get_all_descendants(child['id']))
+                return descendants
+
+            def get_all_ancestors(task_id):
+                ancestors = set()
+                parent_id = tasks_by_id.get(task_id, {}).get('parent_id')
+                while parent_id:
+                    ancestors.add(parent_id)
+                    parent_id = tasks_by_id.get(parent_id, {}).get('parent_id')
+                return ancestors
+
+            for tid in matching_ids:
+                ids_to_show.add(tid)
+                ids_to_show.update(get_all_ancestors(tid))
+                ids_to_show.update(get_all_descendants(tid))
+            
+            tasks_to_display = [r for r in all_tasks if r['id'] in ids_to_show]
+        else:
+            tasks_to_display = all_tasks
+
+        # --- 5) Build tree from the filtered list
         now = datetime.now()
-        for r in tasks:
+        for r in tasks_to_display:
             task_events = events_by_task.get(r["id"], [])
             is_scheduled = bool(task_events)
             is_done = bool(r["is_done"])
 
-            # Apply /hide flags:
-            # - "Scheduled": hide tasks that have any scheduled event (past or future)
-            # - "Done": hide tasks marked done
-            if "Scheduled" in self.hidden_flags and is_scheduled:
-                continue
-            if "Done" in self.hidden_flags and is_done:
+            if ("Scheduled" in self.hidden_flags and is_scheduled) or \
+               ("Done" in self.hidden_flags and is_done):
                 continue
 
-            # Compute "Scheduled" column text (first upcoming if recurring, else first)
             scheduled_date_str = ""
             if task_events:
-                if r["recurrence"]:
-                    future_events = [dt for dt in task_events if dt > now]
-                    shown = future_events[0] if future_events else task_events[-1]
-                else:
-                    shown = task_events[0]
+                future_events = [dt for dt in task_events if dt > now]
+                shown = future_events[0] if future_events else task_events[-1] if r["recurrence"] else task_events[0]
                 scheduled_date_str = shown.strftime("%Y-%m-%d %H:%M")
 
             tags = ("done",) if is_done else ()
+            parent_iid = str(r['parent_id']) if r['parent_id'] else ""
+
+            if parent_iid and not self.tree.exists(parent_iid):
+                continue # Parent is hidden, so hide child
+
             self.tree.insert(
-                "",
-                "end",
-                iid=str(r["id"]),
-                text=r["title"],
+                parent_iid, "end", iid=str(r["id"]), text=r["title"],
                 values=(
-                    r["priority"],
-                    r["duration_minutes"],
-                    r["recurrence"] or "",
-                    r["proj"] or "—",
-                    scheduled_date_str,
+                    r["priority"], r["duration_minutes"], r["recurrence"] or "",
+                    r["proj"] or "—", scheduled_date_str
                 ),
-                tags=tags,
+                tags=tags
             )
-        self.tree.configure(show=("tree","headings"))
+        
+        self.tree.configure(show=("tree", "headings"))
         self.tree.heading("#0", text="Task")
 
     '''
@@ -588,13 +609,13 @@ class TasksPanel(ttk.Frame):
         sel = self.tree.selection()
         return int(sel[0]) if sel else None
 
-    def add(self):
+    def add(self, parent_id=None):
         def on_save(data):
             conn = get_conn()
             cur = conn.cursor()
             cur.execute(
-                "INSERT INTO tasks(title, duration_minutes, notes, created_at, updated_at, recurrence, is_template, project_id, priority) VALUES (?,?,?,?,?,?,?,?,?)",
-                (data["title"], data["duration_minutes"], data["notes"], now_iso(), now_iso(), data["recurrence"], data["is_template"], data["project_id"], data["priority"])
+                "INSERT INTO tasks(title, duration_minutes, notes, created_at, updated_at, recurrence, is_template, project_id, priority, parent_id) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (data["title"], data["duration_minutes"], data["notes"], now_iso(), now_iso(), data["recurrence"], data["is_template"], data["project_id"], data["priority"], data["parent_id"])
             )
             new_task_id = cur.lastrowid
             conn.commit()
@@ -602,11 +623,20 @@ class TasksPanel(ttk.Frame):
             self.refresh()
 
             if new_task_id:
-                self.tree.selection_set(str(new_task_id))
-                self.tree.focus(str(new_task_id))
-                self.tree.see(str(new_task_id))
-                self.on_task_selected(new_task_id)
-        TaskEditor(self, on_save=on_save)
+                iid = str(new_task_id)
+                if self.tree.exists(iid):
+                    self.tree.selection_set(iid)
+                    self.tree.focus(iid)
+                    self.tree.see(iid)
+                    self.on_task_selected(new_task_id)
+        TaskEditor(self, on_save=on_save, parent_id=parent_id)
+
+    def add_subtask(self):
+        parent_id = self.selected_task_id()
+        if not parent_id:
+            messagebox.showinfo("No task selected", "Please select a parent task first.")
+            return
+        self.add(parent_id=parent_id)
 
     def _edit(self, *_):
         self.edit()
@@ -618,8 +648,8 @@ class TasksPanel(ttk.Frame):
         def on_save(data):
             conn = get_conn()
             conn.execute(
-                "UPDATE tasks SET title=?, duration_minutes=?, notes=?, updated_at=?, recurrence=?, is_template=?, project_id=?, priority=? WHERE id=?",
-                (data["title"], data["duration_minutes"], data["notes"], now_iso(), data["recurrence"], data["is_template"], data["project_id"], data["priority"], tid)
+                "UPDATE tasks SET title=?, duration_minutes=?, notes=?, updated_at=?, recurrence=?, is_template=?, project_id=?, priority=?, parent_id=? WHERE id=?",
+                (data["title"], data["duration_minutes"], data["notes"], now_iso(), data["recurrence"], data["is_template"], data["project_id"], data["priority"], data["parent_id"], tid)
             )
             conn.execute(
                 "UPDATE events SET title=?, project_id=? WHERE task_id=?",
@@ -665,7 +695,7 @@ class TasksPanel(ttk.Frame):
         conn = get_conn();
         conn.execute(
             "INSERT INTO tasks(title, duration_minutes, notes, created_at, updated_at, recurrence, is_template, project_id, priority) VALUES (?,?,?,?,?,?,?,?,?)",
-            (r["title"], r["duration_minutes"], r["notes"], now_iso(), now_iso(), r["recurrence"], 0, r["project_id"], r["priority"]) 
+            (r["title"], r["duration_minutes"], r["notes"], now_iso(), now_iso(), r["recurrence"], 0, r["project_id"], r["priority"])
         ); conn.commit(); conn.close(); self.refresh()
         messagebox.showinfo("Template created", f"Created new task from template: {r['title']}")
         self.on_new_from_template()
@@ -1285,15 +1315,6 @@ class WeekView(BaseCalendarView):
         ms = (60 - now.second) * 1000
         self._now_dot_job = self.after(ms, self._start_now_dot_timer)
 
-    def _current_week_start(self):
-        """Return the Monday (date) of the currently displayed week."""
-        # If you already have self.week_start (a date), just `return self.week_start`.
-        if hasattr(self, "week_start") and isinstance(self.week_start, date):
-            return self.week_start
-        # Fallback: compute from a representative date of the shown week.
-        ref = getattr(self, "current_date", date.today())
-        return ref - timedelta(days=ref.weekday())
-
     def _draw_now_dot(self):
         # bail out if canvas isn’t ready
         if not hasattr(self, "canvas") or not self.canvas.winfo_exists():
@@ -1419,7 +1440,7 @@ class WeekView(BaseCalendarView):
         for r in rows: self._render_event(r)
 
     def _render_event(self, r):
-        start = datetime.fromisoformat(r["start_dt"]) ; end = datetime.fromisoformat(r["end_dt"]) 
+        start = datetime.fromisoformat(r["start_dt"]) ; end = datetime.fromisoformat(r["end_dt"])
         day_idx = (start.date() - self.monday).days
         if not (0 <= day_idx < 7):
             return
@@ -1582,7 +1603,7 @@ def import_ics(filepath: str):
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("MyTime Planner V1.7")
+        self.title("MyTime Planner V1.8")
         try:
             # Set application icon
             icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.png")
@@ -1697,7 +1718,7 @@ class App(tk.Tk):
         conn = get_conn(); rows = conn.execute("SELECT * FROM events WHERE start_dt>=? AND start_dt<? ORDER BY start_dt", (start_day.isoformat(), end_day.isoformat())).fetchall(); conn.close()
         export_ics(path, rows); messagebox.showinfo("Export", f"Exported {len(rows)} events to {path}")
     def _import_ics(self):
-        path = filedialog.askopenfilename(filetypes=[("iCal files","*.ics"),("All","*.*")], title="Import .ics")
+        path = filedialog.askopenfilename(filetypes=[("iCal files","*.ics"),("All","*.*")], title=".ics")
         if not path: return
         try:
             import_ics(path)
