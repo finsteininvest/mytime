@@ -248,7 +248,6 @@ class EventEditor(tk.Toplevel):
         ttk.Button(btns, text="Save", command=self.save).pack(side=tk.RIGHT)
 
         # Simple keyboard UX
-        self.bind("<Return>", lambda e: self.save())
         self.bind("<Escape>", lambda e: self.destroy())
 
     def _parse_start(self):
@@ -1108,6 +1107,14 @@ class DayView(BaseCalendarView):
 
     def on_drag(self, event):
         if not self.dragging_event_id: return
+
+        # Auto-scroll
+        scroll_margin = 30
+        if event.y < scroll_margin:
+            self.canvas.yview_scroll(-1, "units")
+        elif event.y > self.canvas.winfo_height() - scroll_margin:
+            self.canvas.yview_scroll(1, "units")
+
         rect_id, text_id, handle_id = self._reverse_map[self.dragging_event_id]
         x1, y1, x2, y2 = self.canvas.coords(rect_id)
         
@@ -1478,6 +1485,14 @@ class WeekView(BaseCalendarView):
 
     def on_drag(self, event):
         if not self.dragging_event_id: return
+
+        # Auto-scroll
+        scroll_margin = 30
+        if event.y < scroll_margin:
+            self.canvas.yview_scroll(-1, "units")
+        elif event.y > self.canvas.winfo_height() - scroll_margin:
+            self.canvas.yview_scroll(1, "units")
+
         rect_id, text_id = self._reverse_map[self.dragging_event_id]
         ox1, oy1, ox2, oy2 = self.drag_rect_orig
         
@@ -1567,7 +1582,7 @@ def import_ics(filepath: str):
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("MyTime Planner V1.6")
+        self.title("MyTime Planner V1.7")
         try:
             # Set application icon
             icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.png")
