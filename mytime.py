@@ -2,7 +2,7 @@ import sqlite3
 import tkinter as tk
 import tkinter.font
 from tkinter import ttk, messagebox, simpledialog, filedialog, colorchooser
-from datetime import datetime, timedelta, date, time, timezone
+from datetime import datetime, timedelta, date, time, timezone, timedelta
 import calendar
 import os
 import sys
@@ -976,8 +976,9 @@ class DayView(BaseCalendarView):
         self.drag_offset_y = 0
         self.context_menu = tk.Menu(self, tearoff=0)
         self.canvas_height = 0
+        self.canvas.bind("<Configure>", lambda e: self.refresh())
 
-
+        self._init_now_dot_hooks()
         self.refresh(); self.after(60000, self._tick_notifications)
 
     def on_right_click(self, event):
@@ -1021,7 +1022,7 @@ class DayView(BaseCalendarView):
     def refresh(self):
         self.canvas.delete("all")
         self.date_var.set(self.current_date.strftime("%A, %d %b %Y"))
-        self._draw_grid(); self._draw_events()
+        self._draw_grid(); self._draw_events(); self._draw_now_dot()
 
     def _draw_grid(self):
         width = max(self.winfo_width() or RIGHT_MIN_WIDTH, RIGHT_MIN_WIDTH)
@@ -1136,6 +1137,38 @@ class DayView(BaseCalendarView):
         conn = get_conn(); conn.execute("UPDATE events SET start_dt=?, end_dt=?, updated_at=? WHERE id=?", (start_dt.isoformat(), end_dt.isoformat(), now_iso(), self.dragging_event_id)); conn.commit(); conn.close()
         self.dragging_event_id = None; self.drag_mode = None; self._notify_change()
 
+    def _init_now_dot_hooks(self):
+        if not hasattr(self, "canvas"):
+            return
+        self._now_dot_job = None
+        self._start_now_dot_timer()
+
+    def _start_now_dot_timer(self):
+        if getattr(self, "_now_dot_job", None):
+            try:
+                self.after_cancel(self._now_dot_job)
+            except Exception:
+                pass
+        self._draw_now_dot()
+        now = datetime.now()
+        ms = (60 - now.second) * 1000
+        self._now_dot_job = self.after(ms, self._start_now_dot_timer)
+
+    def _draw_now_dot(self):
+        if not hasattr(self, "canvas") or not self.canvas.winfo_exists():
+            return
+        c = self.canvas
+        c.delete("now_dot")
+        now = datetime.now()
+        if self.current_date != now.date():
+            return
+        y = time_to_y(now.time())
+        x1 = 60
+        r = 4
+        width = max(self.winfo_width() or RIGHT_MIN_WIDTH, RIGHT_MIN_WIDTH)
+        c.create_line(x1, y, width - 12, y, fill="red", tags="now_dot")
+        c.create_oval(x1 - r, y - r, x1 + r, y + r, fill="red", outline="red", tags="now_dot")
+
     def _tick_notifications(self):
         now = datetime.now()
         start_day = datetime.combine(date.today(), time(0, 0))
@@ -1170,6 +1203,9 @@ class WeekView(BaseCalendarView):
         header = ttk.Frame(self)
         header.pack(fill=tk.X, padx=8, pady=(8,0))
         self.week_label = tk.StringVar()
+        self._now_dot_job = None
+        self.now_dot_radius = 4
+        
         ttk.Button(header, text="◀", width=3, command=self.prev_week).pack(side=tk.LEFT)
         ttk.Button(header, text="This week", command=self.this_week).pack(side=tk.LEFT, padx=6)
         ttk.Button(header, text="▶", width=3, command=self.next_week).pack(side=tk.LEFT)
@@ -1183,6 +1219,7 @@ class WeekView(BaseCalendarView):
         self.canvas.configure(yscrollcommand=scrollbar.set)
 
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
         self.canvas.bind("<Button-1>", self.on_click)
@@ -1194,15 +1231,88 @@ class WeekView(BaseCalendarView):
         self.canvas.bind("<Button-4>", self._on_mousewheel)
         self.canvas.bind("<Button-5>", self._on_mousewheel)
 
-
         self.monday = self._monday_of(date.today())
         self.dragging_event_id = None
         self.drag_offset = (0,0)  # (dx, dy)
         self.drag_rect_orig = None  # (x1,y1,x2,y2)
         self.context_menu = tk.Menu(self, tearoff=0)
         self.canvas_height = 0
-
+        self._init_now_dot_hooks() 
+        self.canvas.bind("<Configure>", lambda e: self.refresh())
+        self._start_now_dot_timer()
         self.refresh()
+
+    def _init_now_dot_hooks(self):
+        """Call this AFTER the week canvas has been created."""
+        # If your canvas has another name (e.g. self.week_canvas), alias it:
+        if not hasattr(self, "canvas"):
+            # ↓↓↓ CHANGE THIS if your canvas is named differently
+            if hasattr(self, "week_canvas"):
+                self.canvas = self.week_canvas
+            elif hasattr(self, "grid_canvas"):
+                self.canvas = self.grid_canvas
+            # else: leave as is; we'll guard below
+
+        # Guard if we still don't have a canvas
+        if not hasattr(self, "canvas"):
+            return
+
+        # one-time state
+        self._now_dot_job = None
+        self.now_dot_radius = 4
+
+        # keep the dot positioned on resize
+        # start minute-by-minute updates
+        self._start_now_dot_timer()
+
+    def _start_now_dot_timer(self):
+        # cancel any previous timer
+        if getattr(self, "_now_dot_job", None):
+            try:
+                self.after_cancel(self._now_dot_job)
+            except Exception:
+                pass
+        # draw now and schedule next update at the next minute boundary
+        self._draw_now_dot()
+        now = datetime.now()
+        ms = (60 - now.second) * 1000
+        self._now_dot_job = self.after(ms, self._start_now_dot_timer)
+
+    def _current_week_start(self):
+        """Return the Monday (date) of the currently displayed week."""
+        # If you already have self.week_start (a date), just `return self.week_start`.
+        if hasattr(self, "week_start") and isinstance(self.week_start, date):
+            return self.week_start
+        # Fallback: compute from a representative date of the shown week.
+        ref = getattr(self, "current_date", date.today())
+        return ref - timedelta(days=ref.weekday())
+
+    def _draw_now_dot(self):
+        # bail out if canvas isn’t ready
+        if not hasattr(self, "canvas") or not self.canvas.winfo_exists():
+            return
+
+        c = self.canvas
+        c.delete("now_dot")
+
+        # only draw if 'today' is within the displayed week
+        week_start = self.monday
+        now = datetime.now()
+        today = now.date()
+        if not (week_start <= today <= week_start + timedelta(days=6)):
+            return
+
+        # column for today
+        day_idx = (today - week_start).days
+        x1, x2 = self._day_x_bounds(day_idx)
+
+        # y using your existing grid mapping (starts at 00:00)
+        y = time_to_y(now.time())
+
+        # small red dot near the right edge of today’s column
+        x = x2 - 8
+        r = 4
+        c.create_oval(x - r, y - r, x + r, y + r, fill="red", outline="red", tags=("now_dot",))
 
     def on_right_click(self, event):
         """
@@ -1249,7 +1359,7 @@ class WeekView(BaseCalendarView):
         self.canvas.delete("all")
         sunday = self.monday + timedelta(days=6)
         self.week_label.set(f"Week of {self.monday.strftime('%d %b %Y')} – {sunday.strftime('%d %b %Y')}")
-        self._draw_grid(); self._draw_events()
+        self._draw_grid(); self._draw_events(); self._draw_now_dot()
 
     # Layout calculations
     def _geom(self):
@@ -1457,7 +1567,7 @@ def import_ics(filepath: str):
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("MyTime Planner V1.4")
+        self.title("MyTime Planner V1.6")
         try:
             # Set application icon
             icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.png")
