@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, date, time, timezone, timedelta
 import calendar
 import os
 import sys
+import csv
 
 DB_PATH = "planner.db"
 HOUR_START = 0
@@ -404,7 +405,7 @@ class TasksPanel(ttk.Frame):
 
         tree_frame = ttk.Frame(self)
         tree_frame.pack(fill=tk.BOTH, expand=True)
-        
+
         self.tree = ttk.Treeview(tree_frame, columns=("prio","dur","recur","proj", "scheduled"), show="headings", selectmode="browse", height=18)
         self.tree.heading("prio", text="Priority")
         self.tree.heading("dur", text="Duration")
@@ -416,7 +417,7 @@ class TasksPanel(ttk.Frame):
         self.tree.column("recur", width=60, anchor="center")
         self.tree.column("proj", width=90, anchor="w")
         self.tree.column("scheduled", width=120, anchor="w")
-        
+
         scrollbar = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscrollcommand=scrollbar.set)
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -429,6 +430,12 @@ class TasksPanel(ttk.Frame):
         self.tree.bind("<MouseWheel>", self._on_mousewheel)
         self.tree.bind("<Button-4>", self._on_mousewheel)
         self.tree.bind("<Button-5>", self._on_mousewheel)
+        self.tree.bind("<Button-3>", self._show_context_menu)
+        self.tree.bind("<Control-Button-1>", self._show_context_menu)
+
+        self.context_menu = tk.Menu(self, tearoff=0)
+        self.context_menu.add_command(label="Export visible to CSV", command=self._export_visible_to_csv)
+        self.context_menu.add_command(label="Copy visible to Clipboard", command=self._copy_visible_to_clipboard)
 
         # Configure font and tag for done tasks
         style = ttk.Style()
@@ -513,7 +520,7 @@ class TasksPanel(ttk.Frame):
             LEFT JOIN projects p ON t.project_id = p.id
             ORDER BY t.created_at ASC
         """,).fetchall()
-        
+
         events_by_task = {}
         all_events = conn.execute("SELECT task_id, start_dt FROM events ORDER BY start_dt").fetchall()
         conn.close()
@@ -527,17 +534,17 @@ class TasksPanel(ttk.Frame):
         tasks_to_display = []
         if self.filter_str:
             tasks_by_id = {r['id']: dict(r) for r in all_tasks}
-            
+
             # Find direct matches
             filter_term = self.filter_str.lower()
             matching_ids = {
-                r['id'] for r in all_tasks 
+                r['id'] for r in all_tasks
                 if filter_term in r['title'].lower() or (r['notes'] and filter_term in r['notes'].lower())
             }
 
             # Include ancestors and descendants of matches
             ids_to_show = set()
-            
+
             def get_all_descendants(task_id):
                 descendants = set()
                 children = [t for t in all_tasks if t['parent_id'] == task_id]
@@ -558,7 +565,7 @@ class TasksPanel(ttk.Frame):
                 ids_to_show.add(tid)
                 ids_to_show.update(get_all_ancestors(tid))
                 ids_to_show.update(get_all_descendants(tid))
-            
+
             tasks_to_display = [r for r in all_tasks if r['id'] in ids_to_show]
         else:
             tasks_to_display = all_tasks
@@ -594,7 +601,7 @@ class TasksPanel(ttk.Frame):
                 ),
                 tags=tags
             )
-        
+
         self.tree.configure(show=("tree", "headings"))
         self.tree.heading("#0", text="Task")
 
@@ -700,6 +707,62 @@ class TasksPanel(ttk.Frame):
         messagebox.showinfo("Template created", f"Created new task from template: {r['title']}")
         self.on_new_from_template()
 
+    def _show_context_menu(self, event):
+        self.context_menu.tk_popup(event.x_root, event.y_root)
+
+    def _get_visible_tasks(self):
+        tasks = []
+        for iid in self.tree.get_children(""):
+            item = self.tree.item(iid)
+            values = item['values']
+            tasks.append([item['text']] + values)
+            # Also get children
+            for child_iid in self.tree.get_children(iid):
+                child_item = self.tree.item(child_iid)
+                child_values = child_item['values']
+                tasks.append(["  " + child_item['text']] + child_values)
+        return tasks
+
+    def _export_visible_to_csv(self):
+        tasks = self._get_visible_tasks()
+        if not tasks:
+            messagebox.showinfo("No tasks", "No visible tasks to export.")
+            return
+
+        filepath = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+            title="Export visible tasks"
+        )
+        if not filepath:
+            return
+
+        try:
+            with open(filepath, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(["Title", "Priority", "Duration", "Recurs", "Project", "Scheduled"])
+                writer.writerows(tasks)
+            messagebox.showinfo("Export successful", f"Exported {len(tasks)} tasks to {filepath}")
+        except Exception as e:
+            messagebox.showerror("Export failed", f"An error occurred: {e}")
+
+    def _copy_visible_to_clipboard(self):
+        tasks = self._get_visible_tasks()
+        if not tasks:
+            return
+
+        # Using StringIO to build the CSV string in memory
+        from io import StringIO
+        output = StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["Title", "Priority", "Duration", "Recurs", "Project", "Scheduled"])
+        writer.writerows(tasks)
+
+        csv_string = output.getvalue()
+        self.clipboard_clear()
+        self.clipboard_append(csv_string)
+        messagebox.showinfo("Copied", f"Copied {len(tasks)} tasks to clipboard.")
+
 # --------------------- UI: Events Panel ---------------------
 
 class EventsPanel(ttk.Frame):
@@ -768,7 +831,7 @@ class EventsPanel(ttk.Frame):
 
         for i in self.tree.get_children():
             self.tree.delete(i)
-        
+
         conn = get_conn()
         query = "SELECT e.*, p.name as proj_name FROM events e LEFT JOIN projects p ON e.project_id = p.id"
         params = []
@@ -776,7 +839,7 @@ class EventsPanel(ttk.Frame):
             query += " WHERE (e.title LIKE ? OR e.notes LIKE ?)"
             params.extend([f"%{self.filter_str}%", f"%{self.filter_str}%"])
         query += " ORDER BY e.start_dt"
-        
+
         events = conn.execute(query, params).fetchall()
         conn.close()
 
@@ -786,18 +849,18 @@ class EventsPanel(ttk.Frame):
             time_str = start_dt.strftime("%H:%M")
             proj_name = event["proj_name"] or "—"
             done_str = "✔" if event["is_done"] else ""
-            
+
             tags = ()
             if event["is_done"]:
                 tags = ("done",)
 
             self.tree.insert(
-                "", "end", iid=str(event["id"]), 
-                values=(date_str, time_str, proj_name, done_str), 
-                text=event["title"], 
+                "", "end", iid=str(event["id"]),
+                values=(date_str, time_str, proj_name, done_str),
+                text=event["title"],
                 tags=tags
             )
-        
+
         self.tree.configure(show=("tree", "headings"))
         self.tree.heading("#0", text="Event Title")
 
@@ -869,7 +932,7 @@ class BaseCalendarView(ttk.Frame):
                 (task["title"], task["id"], start.isoformat(), (start+dur).isoformat(), now_iso(), now_iso(), task["project_id"], task["priority"], task["notes"]))
             start += delta
         conn.commit(); conn.close(); self._notify_change()
-    
+
     def _open_task_editor_for_event(self, event_data):
         r = dict(event_data)  # shallow, cheap
         task_id = r.get("task_id") or r.get("event_task_id")
@@ -1063,7 +1126,7 @@ class DayView(BaseCalendarView):
             y = time_to_y(time(hour=h, minute=0))
             self.canvas.create_line(60, y, width-12, y, fill="#ddd")
             self.canvas.create_text(42, y+2, text=f"{h:02d}:00", anchor="e", fill="#555")
-        
+
         y_end = self.canvas_height
         self.canvas.create_line(60, y_end, width-12, y_end, fill="#ddd")
         self.canvas.create_text(42, y_end+2, text=f"{HOUR_END:02d}:00", anchor="e", fill="#555")
@@ -1130,7 +1193,7 @@ class DayView(BaseCalendarView):
             return
         conn = get_conn(); task = conn.execute("SELECT * FROM tasks WHERE id=?", (self.selected_task_id,)).fetchone(); conn.close()
         if not task: return
-        
+
         t = y_to_time(self.canvas.canvasy(event.y)); start_dt = round_dt(datetime.combine(self.current_date, t)); end_dt = start_dt + timedelta(minutes=int(task["duration_minutes"]))
         if task["recurrence"] in ("DAILY","WEEKLY"): self._create_series(task, start_dt)
         else: self._create_event(task["title"], task["id"], start_dt, end_dt, task["project_id"], task["priority"], task["notes"])
@@ -1147,14 +1210,14 @@ class DayView(BaseCalendarView):
 
         rect_id, text_id, handle_id = self._reverse_map[self.dragging_event_id]
         x1, y1, x2, y2 = self.canvas.coords(rect_id)
-        
+
         canvas_y = self.canvas.canvasy(event.y)
 
         if self.drag_mode == "move":
             height = y2 - y1
             new_y1 = clamp(canvas_y - self.drag_offset_y, 0, self.canvas_height - height)
             new_y2 = new_y1 + height
-            
+
             self.canvas.coords(rect_id, x1, new_y1, x2, new_y2)
             self.canvas.coords(text_id, x1 + 8, new_y1 + 8)
             self.canvas.coords(handle_id, x2 - 12, new_y2 - 6, x2 - 4, new_y2 - 2)
@@ -1242,7 +1305,7 @@ class WeekView(BaseCalendarView):
         self.week_label = tk.StringVar()
         self._now_dot_job = None
         self.now_dot_radius = 4
-        
+
         ttk.Button(header, text="◀", width=3, command=self.prev_week).pack(side=tk.LEFT)
         ttk.Button(header, text="This week", command=self.this_week).pack(side=tk.LEFT, padx=6)
         ttk.Button(header, text="▶", width=3, command=self.next_week).pack(side=tk.LEFT)
@@ -1256,7 +1319,7 @@ class WeekView(BaseCalendarView):
         self.canvas.configure(yscrollcommand=scrollbar.set)
 
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        
+
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
         self.canvas.bind("<Button-1>", self.on_click)
@@ -1274,7 +1337,7 @@ class WeekView(BaseCalendarView):
         self.drag_rect_orig = None  # (x1,y1,x2,y2)
         self.context_menu = tk.Menu(self, tearoff=0)
         self.canvas_height = 0
-        self._init_now_dot_hooks() 
+        self._init_now_dot_hooks()
         self.canvas.bind("<Configure>", lambda e: self.refresh())
         self._start_now_dot_timer()
         self.refresh()
@@ -1416,7 +1479,7 @@ class WeekView(BaseCalendarView):
             y = time_to_y(time(hour=h, minute=0))
             self.canvas.create_line(left, y, width-right, y, fill="#ddd")
             self.canvas.create_text(left-8, y+2, text=f"{h:02d}:00", anchor="e", fill="#555")
-        
+
         y_end = height
         self.canvas.create_line(left, y_end, width-right, y_end, fill="#ddd")
         self.canvas.create_text(left-8, y_end+2, text=f"{HOUR_END:02d}:00", anchor="e", fill="#555")
@@ -1516,21 +1579,21 @@ class WeekView(BaseCalendarView):
 
         rect_id, text_id = self._reverse_map[self.dragging_event_id]
         ox1, oy1, ox2, oy2 = self.drag_rect_orig
-        
+
         canvas_x = self.canvas.canvasx(event.x)
         canvas_y = self.canvas.canvasy(event.y)
-        
+
         dx = canvas_x - (ox1 + self.drag_offset[0])
         dy = canvas_y - (oy1 + self.drag_offset[1])
-        
+
         height = oy2 - oy1
         width = ox2 - ox1
-        
+
         new_x1 = ox1 + dx
         new_y1 = clamp(oy1 + dy, 0, self.canvas_height - height)
         new_x2 = new_x1 + width
         new_y2 = new_y1 + height
-        
+
         self.canvas.coords(rect_id, new_x1, new_y1, new_x2, new_y2)
         self.canvas.coords(text_id, new_x1 + 6, new_y1 + 6)
 
@@ -1545,7 +1608,7 @@ class WeekView(BaseCalendarView):
             # If dropped outside, snap back to original day
             start_dt_orig = datetime.fromisoformat(self._event_items[rect_id]["start_dt"])
             target_day = (start_dt_orig.date() - self.monday).days
-        
+
         # compute new start/end datetimes
         start_time = y_to_time(y1); end_time = y_to_time(y2)
         new_date = self.monday + timedelta(days=target_day)
@@ -1603,7 +1666,7 @@ def import_ics(filepath: str):
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("MyTime Planner V1.8")
+        self.title("MyTime Planner V1.9")
         try:
             # Set application icon
             icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.png")
@@ -1739,24 +1802,24 @@ class App(tk.Tk):
             "SELECT start_dt FROM events WHERE task_id=? AND start_dt >= ? ORDER BY start_dt ASC LIMIT 1",
             (tid, datetime.now().isoformat())
         ).fetchone()
-        
+
         if not event:
             event = conn.execute(
                 "SELECT start_dt FROM events WHERE task_id=? ORDER BY start_dt DESC LIMIT 1",
                 (tid,)
             ).fetchone()
-        
+
         conn.close()
 
         if event:
             event_date = datetime.fromisoformat(event['start_dt']).date()
-            
+
             self.day_view.current_date = event_date
             self.day_view.refresh()
-            
+
             self.week_view.monday = self.week_view._monday_of(event_date)
             self.week_view.refresh()
-            
+
             self.tabs.select(self.day_view)
 
     def on_event_selected(self, event_id):
@@ -1767,13 +1830,13 @@ class App(tk.Tk):
             return
 
         event_date = datetime.fromisoformat(event['start_dt']).date()
-        
+
         self.day_view.current_date = event_date
         self.day_view.refresh()
-        
+
         self.week_view.monday = self.week_view._monday_of(event_date)
         self.week_view.refresh()
-        
+
         self.tabs.select(self.day_view)
 
     def refresh_all(self):
