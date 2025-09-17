@@ -8,7 +8,7 @@ A Python app to collect and schedule todos.
   
 2. Download mytime.py
   
-3. Download icon.png
+3. Download icon.png into the same directory as mytime.py
   
 
 ## Run
