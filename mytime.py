@@ -539,7 +539,9 @@ class TasksPanel(ttk.Frame):
             filter_term = self.filter_str.lower()
             matching_ids = {
                 r['id'] for r in all_tasks
-                if filter_term in r['title'].lower() or (r['notes'] and filter_term in r['notes'].lower())
+                if filter_term in r['title'].lower()
+                or (r['notes'] and filter_term in r['notes'].lower())
+                or (r['proj'] and filter_term in r['proj'].lower())
             }
 
             # Include ancestors and descendants of matches
@@ -1666,7 +1668,7 @@ def import_ics(filepath: str):
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("MyTime Planner V1.9")
+        self.title("MyTime Planner V1.9.1")
         try:
             # Set application icon
             icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.png")
