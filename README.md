@@ -23,4 +23,4 @@ If you have to add the "3" or not depends how you installed Python.
 
 ## Read documentation
 
-Coming soon...
+Here: https://github.com/finsteininvest/mytime/wiki/mytime-Manual
