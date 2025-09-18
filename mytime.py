@@ -226,16 +226,22 @@ class EventEditor(tk.Toplevel):
         self.title_var = tk.StringVar(value=event["title"] if event else "")
         ttk.Entry(self, textvariable=self.title_var, width=44).grid(row=1, column=0, columnspan=4, padx=8, sticky="ew")
 
-        # --- Date & Time (NEW)
+        # --- Date & Time
         start_dt = datetime.fromisoformat(event["start_dt"]) if event and event.get("start_dt") else datetime.now()
+        end_dt = datetime.fromisoformat(event["end_dt"]) if event and event.get("end_dt") else start_dt + timedelta(minutes=60)
+        duration_minutes = (end_dt - start_dt).total_seconds() / 60
+
         ttk.Label(self, text="Date (YYYY-MM-DD)").grid(row=2, column=0, sticky="w", padx=8, pady=(8,2))
         ttk.Label(self, text="Time (HH:MM)").grid(row=2, column=1, sticky="w", padx=8, pady=(8,2))
+        ttk.Label(self, text="Duration (min)").grid(row=2, column=2, sticky="w", padx=8, pady=(8,2))
 
         self.date_var = tk.StringVar(value=start_dt.strftime("%Y-%m-%d"))
         self.time_var = tk.StringVar(value=start_dt.strftime("%H:%M"))
+        self.duration_var = tk.IntVar(value=int(duration_minutes))
 
         ttk.Entry(self, textvariable=self.date_var, width=14).grid(row=3, column=0, padx=8, sticky="w")
         ttk.Entry(self, textvariable=self.time_var, width=10).grid(row=3, column=1, padx=8, sticky="w")
+        ttk.Spinbox(self, from_=5, to=480, increment=5, textvariable=self.duration_var, width=10).grid(row=3, column=2, padx=8, sticky="w")
 
         # --- Notes
         ttk.Label(self, text="Notes").grid(row=5, column=0, sticky="w", padx=8, pady=(8,2))
@@ -273,14 +279,7 @@ class EventEditor(tk.Toplevel):
         if new_start is None:
             return
 
-        # Keep the original duration
-        try:
-            old_start = datetime.fromisoformat(self.event["start_dt"])
-            old_end = datetime.fromisoformat(self.event["end_dt"])
-            duration = old_end - old_start
-        except Exception:
-            duration = timedelta(minutes=60)  # safe default if missing
-
+        duration = timedelta(minutes=self.duration_var.get())
         new_end = new_start + duration
         notes = self.notes.get("1.0", "end").strip()
 
@@ -1668,7 +1667,7 @@ def import_ics(filepath: str):
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("MyTime Planner V1.9.1")
+        self.title("MyTime Planner V1.9.5")
         try:
             # Set application icon
             icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.png")
