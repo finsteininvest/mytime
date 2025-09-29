@@ -2,13 +2,14 @@ import sqlite3
 import tkinter as tk
 import tkinter.font
 from tkinter import ttk, messagebox, simpledialog, filedialog, colorchooser
+from tkcalendar import Calendar, DateEntry
 from datetime import datetime, timedelta, date, time, timezone, timedelta
 import calendar
 import os
 import sys
 import csv
 
-DB_PATH = "planner.db"
+DB_PATH = "/Users/Marc/Library/Mobile Documents/com~apple~CloudDocs/mytime/planner.db"
 HOUR_START = 0
 HOUR_END = 24
 MINUTE_STEP = 15
@@ -54,6 +55,8 @@ def init_db():
         cur.execute("ALTER TABLE tasks ADD COLUMN is_done INTEGER NOT NULL DEFAULT 0")
     if 'parent_id' not in columns:
         cur.execute("ALTER TABLE tasks ADD COLUMN parent_id INTEGER REFERENCES tasks(id) ON DELETE CASCADE")
+    if 'due_date' not in columns:
+        cur.execute("ALTER TABLE tasks ADD COLUMN due_date TEXT DEFAULT NULL")
 
     # projects
     cur.execute(
@@ -293,6 +296,28 @@ class EventEditor(tk.Toplevel):
         self.destroy()
 
 
+class DatePicker(tk.Toplevel):
+    def __init__(self, master, on_select):
+        super().__init__(master)
+        self.title("Select Date")
+        self.on_select = on_select
+        self.resizable(False, False)
+
+        self.calendar = Calendar(self, selectmode='day', date_pattern='y-mm-dd')
+        self.calendar.pack(padx=10, pady=10)
+
+        ttk.Button(self, text="Select", command=self._on_select_button).pack(pady=(0, 10))
+
+        self.grab_set() # Make modal
+        self.transient(master)
+        self.wait_window(self)
+
+    def _on_select_button(self):
+        selected_date = self.calendar.get_date()
+        self.on_select(selected_date)
+        self.destroy()
+
+
 class TaskEditor(tk.Toplevel):
     def __init__(self, master, task=None, on_save=None, parent_id=None):
         super().__init__(master)
@@ -322,7 +347,14 @@ class TaskEditor(tk.Toplevel):
         self.prio_var = tk.StringVar(value=task["priority"] if task else "Normal")
         ttk.Combobox(self, textvariable=self.prio_var, values=["Low","Normal","High"], state="readonly", width=10).grid(row=3, column=2, padx=8)
 
-        ttk.Label(self, text="Project").grid(row=2, column=3, sticky="w", padx=8, pady=(8,2))
+        ttk.Label(self, text="Due Date (YYYY-MM-DD)").grid(row=2, column=3, sticky="w", padx=8, pady=(8,2))
+        due_date_frame = ttk.Frame(self)
+        due_date_frame.grid(row=3, column=3, padx=8, sticky="w")
+        self.due_date_var = tk.StringVar(value=task["due_date"] if task and task["due_date"] else "")
+        ttk.Entry(due_date_frame, textvariable=self.due_date_var, width=12).pack(side=tk.LEFT)
+        ttk.Button(due_date_frame, text="...", width=2, command=self._open_date_picker).pack(side=tk.LEFT, padx=(2,0))
+
+        ttk.Label(self, text="Project").grid(row=4, column=0, sticky="w", padx=8, pady=(8,2))
         self.project_var = tk.StringVar(value="")
         self.project_map = self._load_projects()
         proj_names = ["(none)"] + [p[1] for p in self.project_map]
@@ -332,22 +364,28 @@ class TaskEditor(tk.Toplevel):
                 if pid == task["project_id"]:
                     default_name = name
         self.project_combo = ttk.Combobox(self, textvariable=self.project_var, values=proj_names, state="readonly", width=14)
-        self.project_combo.grid(row=3, column=3, padx=8)
+        self.project_combo.grid(row=5, column=0, padx=8, sticky="w")
         self.project_combo.set(default_name)
 
         self.is_tmpl = tk.BooleanVar(value=bool(task["is_template"]) if task else False)
-        ttk.Checkbutton(self, text="Save as template", variable=self.is_tmpl).grid(row=4, column=0, padx=8, pady=(8,2), sticky="w")
+        ttk.Checkbutton(self, text="Save as template", variable=self.is_tmpl).grid(row=5, column=1, padx=8, pady=(8,2), sticky="w")
 
-        ttk.Label(self, text="Notes").grid(row=5, column=0, sticky="w", padx=8, pady=(8,2))
+        ttk.Label(self, text="Notes").grid(row=6, column=0, sticky="w", padx=8, pady=(8,2))
         self.notes = tk.Text(self, width=60, height=8)
-        self.notes.grid(row=6, column=0, columnspan=4, padx=8, pady=(0,8))
+        self.notes.grid(row=7, column=0, columnspan=4, padx=8, pady=(0,8))
         if task:
             self.notes.insert("1.0", task["notes"] or "")
 
         btns = ttk.Frame(self)
-        btns.grid(row=7, column=0, columnspan=4, pady=8)
+        btns.grid(row=8, column=0, columnspan=4, pady=8)
         ttk.Button(btns, text="Cancel", command=self.destroy).pack(side=tk.RIGHT, padx=4)
         ttk.Button(btns, text="Save", command=self.save).pack(side=tk.RIGHT)
+
+    def _open_date_picker(self):
+        DatePicker(self, self._set_due_date)
+
+    def _set_due_date(self, selected_date):
+        self.due_date_var.set(selected_date)
 
     def _load_projects(self):
         conn = get_conn(); rows = conn.execute("SELECT id, name FROM projects ORDER BY name").fetchall(); conn.close()
@@ -358,6 +396,19 @@ class TaskEditor(tk.Toplevel):
         if not title:
             messagebox.showerror("Missing title", "Please enter a title")
             return
+
+        due_date_str = self.due_date_var.get().strip()
+        due_date = None
+        if due_date_str:
+            try:
+                due_date = datetime.strptime(due_date_str, "%Y-%m-%d").date()
+            except ValueError:
+                try:
+                    due_date = datetime.strptime(due_date_str, "%y-%m-%d").date()
+                except ValueError:
+                    messagebox.showerror("Invalid Date", "Please enter the due date in YYYY-MM-DD format.")
+                    return
+
         dur = max(5, int(self.duration_var.get()))
         notes = self.notes.get("1.0", "end").strip()
         rec = self.recur_var.get()
@@ -379,7 +430,8 @@ class TaskEditor(tk.Toplevel):
                 "is_template": 1 if self.is_tmpl.get() else 0,
                 "project_id": pid,
                 "priority": prio,
-                "parent_id": self.parent_id
+                "parent_id": self.parent_id,
+                "due_date": due_date.isoformat() if due_date else None
             })
         self.destroy()
 
@@ -405,17 +457,19 @@ class TasksPanel(ttk.Frame):
         tree_frame = ttk.Frame(self)
         tree_frame.pack(fill=tk.BOTH, expand=True)
 
-        self.tree = ttk.Treeview(tree_frame, columns=("prio","dur","recur","proj", "scheduled"), show="headings", selectmode="browse", height=18)
+        self.tree = ttk.Treeview(tree_frame, columns=("prio","dur","recur","proj", "scheduled", "due_date"), show="headings", selectmode="browse", height=18)
         self.tree.heading("prio", text="Priority")
         self.tree.heading("dur", text="Duration")
         self.tree.heading("recur", text="Recurs")
         self.tree.heading("proj", text="Project")
         self.tree.heading("scheduled", text="Scheduled")
+        self.tree.heading("due_date", text="Due Date")
         self.tree.column("prio", width=60, anchor="center")
         self.tree.column("dur", width=70, anchor="center")
         self.tree.column("recur", width=60, anchor="center")
         self.tree.column("proj", width=90, anchor="w")
         self.tree.column("scheduled", width=120, anchor="w")
+        self.tree.column("due_date", width=100, anchor="w")
 
         scrollbar = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscrollcommand=scrollbar.set)
@@ -442,6 +496,9 @@ class TasksPanel(ttk.Frame):
         done_font = tk.font.Font(font=font_spec)
         done_font.configure(overstrike=True)
         self.tree.tag_configure("done", font=done_font, foreground="#777")
+        self.tree.tag_configure("overdue", foreground="#e57373")
+        self.tree.tag_configure("due_today", foreground="#81c784")
+        self.tree.tag_configure("due_soon", foreground="#64b5f6")
 
         btns = ttk.Frame(self)
         btns.pack(fill=tk.X, padx=8, pady=(0,8))
@@ -450,7 +507,7 @@ class TasksPanel(ttk.Frame):
         ttk.Button(btns, text="✎ (E)dit", command=self.edit).pack(side=tk.LEFT, padx=6)
         ttk.Button(btns, text="✔ (D)one", command=self.mark_as_done).pack(side=tk.LEFT)
         ttk.Button(btns, text="(U)nschedule", command=self.unschedule).pack(side=tk.LEFT)
-        ttk.Button(btns, text="🗑 Delete", command=self.delete).pack(side=tk.LEFT, padx=6)
+        ttk.Button(btns, text="🗑 (-) Delete", command=self.delete).pack(side=tk.LEFT, padx=6)
         ttk.Button(btns, text="📄 From Template", command=self.new_from_template).pack(side=tk.RIGHT)
 
     def _on_mousewheel(self, event):
@@ -472,17 +529,19 @@ class TasksPanel(ttk.Frame):
         tid = self.selected_task_id()
         if not tid:
             return
+
         conn = get_conn()
         count = conn.execute("SELECT COUNT(*) FROM events WHERE task_id=?", (tid,)).fetchone()[0]
         if count == 0:
             conn.close()
             messagebox.showinfo("Unschedule", "This task has no scheduled events.")
             return
-        if not messagebox.askyesno("Unschedule", f"Remove {count} scheduled event(s) for this task?"):
+        if not messagebox.askyesno("Unschedule", f"Unlink {count} scheduled event(s) from this task? Events will remain scheduled."):
             conn.close()
             return
-        conn.execute("DELETE FROM events WHERE task_id=?", (tid,))
+        conn.execute("UPDATE events SET task_id = NULL, updated_at = ? WHERE task_id = ?", (now_iso(), tid))
         conn.commit(); conn.close()
+
         # refresh everywhere
         self.on_new_from_template()  # calls App.refresh_all
 
@@ -588,7 +647,20 @@ class TasksPanel(ttk.Frame):
                 shown = future_events[0] if future_events else task_events[-1] if r["recurrence"] else task_events[0]
                 scheduled_date_str = shown.strftime("%Y-%m-%d %H:%M")
 
-            tags = ("done",) if is_done else ()
+            tags = []
+            if is_done:
+                tags.append("done")
+
+            if r["due_date"]:
+                due_date = date.fromisoformat(r["due_date"])
+                today = date.today()
+                if due_date < today:
+                    tags.append("overdue")
+                elif due_date == today:
+                    tags.append("due_today")
+                elif (due_date - today).days <= 7:
+                    tags.append("due_soon")
+
             parent_iid = str(r['parent_id']) if r['parent_id'] else ""
 
             if parent_iid and not self.tree.exists(parent_iid):
@@ -598,9 +670,9 @@ class TasksPanel(ttk.Frame):
                 parent_iid, "end", iid=str(r["id"]), text=r["title"],
                 values=(
                     r["priority"], r["duration_minutes"], r["recurrence"] or "",
-                    r["proj"] or "—", scheduled_date_str
+                    r["proj"] or "—", scheduled_date_str, r["due_date"] or ""
                 ),
-                tags=tags
+                tags=tuple(tags)
             )
 
         self.tree.configure(show=("tree", "headings"))
@@ -622,8 +694,8 @@ class TasksPanel(ttk.Frame):
             conn = get_conn()
             cur = conn.cursor()
             cur.execute(
-                "INSERT INTO tasks(title, duration_minutes, notes, created_at, updated_at, recurrence, is_template, project_id, priority, parent_id) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (data["title"], data["duration_minutes"], data["notes"], now_iso(), now_iso(), data["recurrence"], data["is_template"], data["project_id"], data["priority"], data["parent_id"])
+                "INSERT INTO tasks(title, duration_minutes, notes, created_at, updated_at, recurrence, is_template, project_id, priority, parent_id, due_date) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (data["title"], data["duration_minutes"], data["notes"], now_iso(), now_iso(), data["recurrence"], data["is_template"], data["project_id"], data["priority"], data["parent_id"], data["due_date"])
             )
             new_task_id = cur.lastrowid
             conn.commit()
@@ -656,8 +728,8 @@ class TasksPanel(ttk.Frame):
         def on_save(data):
             conn = get_conn()
             conn.execute(
-                "UPDATE tasks SET title=?, duration_minutes=?, notes=?, updated_at=?, recurrence=?, is_template=?, project_id=?, priority=?, parent_id=? WHERE id=?",
-                (data["title"], data["duration_minutes"], data["notes"], now_iso(), data["recurrence"], data["is_template"], data["project_id"], data["priority"], data["parent_id"], tid)
+                "UPDATE tasks SET title=?, duration_minutes=?, notes=?, updated_at=?, recurrence=?, is_template=?, project_id=?, priority=?, parent_id=?, due_date=? WHERE id=?",
+                (data["title"], data["duration_minutes"], data["notes"], now_iso(), data["recurrence"], data["is_template"], data["project_id"], data["priority"], data["parent_id"], data["due_date"], tid)
             )
             conn.execute(
                 "UPDATE events SET title=?, project_id=? WHERE task_id=?",
@@ -702,8 +774,8 @@ class TasksPanel(ttk.Frame):
         r = rows[idx-1]
         conn = get_conn();
         conn.execute(
-            "INSERT INTO tasks(title, duration_minutes, notes, created_at, updated_at, recurrence, is_template, project_id, priority) VALUES (?,?,?,?,?,?,?,?,?)",
-            (r["title"], r["duration_minutes"], r["notes"], now_iso(), now_iso(), r["recurrence"], 0, r["project_id"], r["priority"])
+            "INSERT INTO tasks(title, duration_minutes, notes, created_at, updated_at, recurrence, is_template, project_id, priority, due_date) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (r["title"], r["duration_minutes"], r["notes"], now_iso(), now_iso(), r["recurrence"], 0, r["project_id"], r["priority"], r["due_date"])
         ); conn.commit(); conn.close(); self.refresh()
         messagebox.showinfo("Template created", f"Created new task from template: {r['title']}")
         self.on_new_from_template()
@@ -713,14 +785,15 @@ class TasksPanel(ttk.Frame):
 
     def _get_visible_tasks(self):
         tasks = []
+        column_ids = self.tree["columns"]
         for iid in self.tree.get_children(""):
             item = self.tree.item(iid)
-            values = item['values']
+            values = [item['values'][i] for i, col_id in enumerate(column_ids)]
             tasks.append([item['text']] + values)
             # Also get children
             for child_iid in self.tree.get_children(iid):
                 child_item = self.tree.item(child_iid)
-                child_values = child_item['values']
+                child_values = [child_item['values'][i] for i, col_id in enumerate(column_ids)]
                 tasks.append(["  " + child_item['text']] + child_values)
         return tasks
 
@@ -741,7 +814,8 @@ class TasksPanel(ttk.Frame):
         try:
             with open(filepath, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
-                writer.writerow(["Title", "Priority", "Duration", "Recurs", "Project", "Scheduled"])
+                headers = ["Title"] + [self.tree.heading(col)["text"] for col in self.tree["columns"]]
+                writer.writerow(headers)
                 writer.writerows(tasks)
             messagebox.showinfo("Export successful", f"Exported {len(tasks)} tasks to {filepath}")
         except Exception as e:
@@ -756,7 +830,8 @@ class TasksPanel(ttk.Frame):
         from io import StringIO
         output = StringIO()
         writer = csv.writer(output)
-        writer.writerow(["Title", "Priority", "Duration", "Recurs", "Project", "Scheduled"])
+        headers = ["Title"] + [self.tree.heading(col)["text"] for col in self.tree["columns"]]
+        writer.writerow(headers)
         writer.writerows(tasks)
 
         csv_string = output.getvalue()
@@ -952,8 +1027,8 @@ class BaseCalendarView(ttk.Frame):
         def on_save(data):
             conn = get_conn()
             conn.execute(
-                "UPDATE tasks SET title=?, duration_minutes=?, notes=?, updated_at=?, recurrence=?, is_template=?, project_id=?, priority=? WHERE id=?",
-                (data["title"], data["duration_minutes"], data["notes"], now_iso(), data["recurrence"], data["is_template"], data["project_id"], data["priority"], task_id)
+                "UPDATE tasks SET title=?, duration_minutes=?, notes=?, updated_at=?, recurrence=?, is_template=?, project_id=?, priority=?, parent_id=?, due_date=? WHERE id=?",
+                (data["title"], data["duration_minutes"], data["notes"], now_iso(), data["recurrence"], data["is_template"], data["project_id"], data["priority"], data["parent_id"], data["due_date"], task_id)
             )
             conn.execute(
                 "UPDATE events SET project_id=? WHERE task_id=?",
@@ -1276,12 +1351,14 @@ class DayView(BaseCalendarView):
         end_day = start_day + timedelta(days=1)
         conn = get_conn()
         rows = conn.execute(
-            "SELECT id, title, start_dt FROM events WHERE start_dt>=? AND start_dt<? ORDER BY start_dt",
+            "SELECT id, title, start_dt, is_done FROM events WHERE start_dt>=? AND start_dt<? ORDER BY start_dt",
             (start_day.isoformat(), end_day.isoformat())
         ).fetchall()
         conn.close()
 
         for r in rows:
+            if r["is_done"]:
+                continue
             event_start_dt = datetime.fromisoformat(r["start_dt"])
             delta_seconds = (event_start_dt - now).total_seconds()
             event_time_str = event_start_dt.strftime('%H:%M')
@@ -1667,7 +1744,7 @@ def import_ics(filepath: str):
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("MyTime Planner V1.9.5")
+        self.title("MyTime Planner V1.10.2")
         try:
             # Set application icon
             icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.png")
@@ -1713,6 +1790,7 @@ class App(tk.Tk):
         self.bind("<plus>", self.on_plus_key)
         self.bind("<e>", self.on_e_key)
         self.bind("<d>", self.on_d_key)
+        self.bind("<minus>", self.on_minus_key)
 
     def _create_menu(self):
         menubar = tk.Menu(self)
@@ -1756,6 +1834,12 @@ class App(tk.Tk):
         if isinstance(focused_widget, (ttk.Entry, ttk.Spinbox, tk.Text)):
             return
         self.tasks_panel.mark_as_done()
+
+    def on_minus_key(self, event=None):
+        focused_widget = self.focus_get()
+        if isinstance(focused_widget, (ttk.Entry, ttk.Spinbox, tk.Text)):
+            return
+        self.tasks_panel.delete()
 
     def _open_projects(self):
         ProjectEditor(self, on_change=self.refresh_all)
